@@ -4,7 +4,7 @@ import docker, time, re, subprocess
 
 app = FastAPI(
     title="WordPress Shop Setup Service",
-    description="Provision WooCommerce multisite shops with Chinese locale & WooCommerce translations",
+    description="Provision WooCommerce with multi-tenant support, themes, demo data and support localization by providing locale.",
     version="16.0.0"
 )
 
@@ -19,8 +19,7 @@ SHARED_WP_NAME = "shared_wp_shop"
 
 WOO_DEMO_URL = "https://raw.githubusercontent.com/woocommerce/woocommerce/trunk/plugins/woocommerce/sample-data/sample_products.xml"
 WOO_DEMO_PATH = "/var/www/html/demo.xml"
-WOO_ZIP_URL = "https://downloads.wordpress.org/plugin/woocommerce.latest-stable.zip"
-
+WOO_ZIP_URL = "https://downloads.wordpress.org/plugin/woocommerce.8.6.1.zip"
 
 # -----------------------------
 # Data Models
@@ -30,7 +29,7 @@ class ShopRequest(BaseModel):
     email: str = "admin@example.com"
     tenant_mode: str = "multi"
     theme: str = "woostify"
-    locale: str = "zh_TW"  # zh_TW / zh_CN / zh_HK / en_US
+    locale: str = "en_US"  # zh_TW / zh_CN / zh_HK / en_US
     wp_image: str = "wordpress:6.7-php8.2-apache"
     mysql_image: str = "mysql:5.7"
 
