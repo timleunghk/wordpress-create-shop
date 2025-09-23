@@ -10,7 +10,7 @@ Supports Localized Interface and translation workflow.
 - Automatic WooCommerce installation and demo product import
 - Multisite network with custom rewrite rules for subsites
 - Export WooCommerce translation strings to CSV
-- Upload translated CSV to generate PO/MO and deploy to WooCommerce language directory
+- Upload translated CSV or JSON to generate PO/MO and deploy to WooCommerce language directory
 
 ## Requirements
 
@@ -68,8 +68,16 @@ curl -O http://localhost:5000/download_csv/{store_name}
 
 Upload a translated CSV to generate PO/MO and deploy:
 ```sh
-curl -X POST http://localhost:5000/upload_csv/{store_name} \
+curl -X POST http://localhost:5000/upload_csv/{store_name}/{lang_code} \
   -F "file=@woocommerce.csv"
+```
+
+### Upload Translated JSON
+
+Upload a translated JSON to generate PO/MO and deploy:
+```sh
+curl -X POST http://localhost:5000/upload_json/{store_name}/{lang_code} \
+  -F "file=@woocommerce.json"
 ```
 
 ## Notes
