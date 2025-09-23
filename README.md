@@ -91,6 +91,7 @@ curl -X POST http://localhost:5000/upload_json/{store_name}/{lang_code} \
 
 ![Swagger API Screen -- Create a new WordPress Shop](ShopSetup.jpg)
 ![Demonstration - WordPress with WooCommerce Shop Plugin + Product Demo](WooCommerce_Shop.jpg)
+![Docker Image of MySQL (shared_db_shop) and WordPress Multi Site (shared_wp_shop)](docker.jpg)
 
 ## License
 
