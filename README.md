@@ -87,6 +87,11 @@ curl -X POST http://localhost:5000/upload_json/{store_name}/{lang_code} \
 - Logs are written to files named like `log_YYYYMMDD_HHMMSS.log`.
 - Translation workflow uses [polib](https://github.com/translate/polib) for PO/MO file handling.
 
+## Screen Shot
+
+![Swagger API Screen -- Create a new WordPress Shop](ShopSetup.jpg)
+![Demonstration - WordPress with WooCommerce Shop Plugin + Product Demo](WooCommerce_Shop.jpg)
+
 ## License
 
 MIT
