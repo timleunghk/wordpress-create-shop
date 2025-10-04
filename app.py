@@ -11,6 +11,7 @@ from datetime import datetime
 from tempfile import NamedTemporaryFile
 from typing import Optional, List
 
+import sys
 import docker
 import polib
 import requests
@@ -34,12 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"📄 Log file created: {log_filename}")
 
-
 # ============================
 # Docker Client
 # ============================
 client = docker.from_env()
-
 
 # ============================
 # Constants
@@ -88,7 +87,7 @@ PAYMENT_LABELS = {
 
 
 # ============================
-# Pydantic Models
+# Models
 # ============================
 class CompanyInfo(BaseModel):
     name: str
@@ -109,18 +108,18 @@ class ShopRequest(BaseModel):
     company: Optional[List[CompanyInfo]] = None
     wp_image: str = "wordpress:6.7-php8.2-apache"
     mysql_image: str = "mysql:5.7"
+    extra_gateways: Optional[List[str]] = []
+    payment_settings: Optional[dict] = {}
 
 
 # ============================
-# Helper Functions
+# Helper
 # ============================
 def sanitize_store_name(name: str) -> str:
-    """Sanitize store name for slug compatibility"""
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "site"
 
 
 def wait_for_mysql(container: str, user: str, pw: str, db: str, timeout=120) -> bool:
-    """Wait until MySQL container is ready"""
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -143,21 +142,17 @@ def wait_for_mysql(container: str, user: str, pw: str, db: str, timeout=120) -> 
 
 
 def run_wp_cli(container, cmd: str) -> str:
-    """Run wp-cli command in WP container"""
     logger.info(f"▶ Running: {cmd}")
     result = container.exec_run(cmd, user="root", workdir="/var/www/html")
     output = result.output.decode("utf-8")
-
     if result.exit_code != 0:
         logger.error(f"❌ Error: {output}")
     else:
         logger.info(f"✔ Output: {output.strip()}")
-
     return output
 
 
 def ensure_wp_cli(container):
-    """Ensure WP-CLI and required packages installed in container"""
     if container.exec_run("wp --info --allow-root", workdir="/var/www/html").exit_code != 0:
         logger.info("🔧 Installing wp-cli...")
         container.exec_run(
@@ -171,12 +166,9 @@ def ensure_wp_cli(container):
         "bash -c \"echo 'memory_limit = 512M' > /usr/local/etc/php/conf.d/memory-limit.ini\"",
         user="root",
     )
-    result = container.exec_run("php -i | grep memory_limit", user="root")
-    logger.info(f"✅ PHP memory_limit setting: {result.output.decode().strip()}")
 
 
 def ensure_network_core(wp, site_url, title, email):
-    """Ensure core multisite network is created"""
     if "WordPress is installed" not in run_wp_cli(wp, "wp core is-installed --allow-root"):
         return run_wp_cli(
             wp,
@@ -188,7 +180,6 @@ def ensure_network_core(wp, site_url, title, email):
 
 
 def enable_rewrite_for_subsites(wp):
-    """Enable .htaccess rewrite rules for multisite subsites"""
     htaccess = r"""
 # BEGIN WordPress
 <IfModule mod_rewrite.c>
@@ -208,9 +199,7 @@ RewriteRule . /index.php [L]
 
 
 def copy_to_container(container, local_file: str, remote_dir: str):
-    """Copy a local file into the container at remote_dir"""
     container.exec_run(f"mkdir -p {remote_dir}", user="root")
-
     tarstream = io.BytesIO()
     basename = os.path.basename(local_file)
     with tarfile.open(fileobj=tarstream, mode="w") as tar:
@@ -220,25 +209,19 @@ def copy_to_container(container, local_file: str, remote_dir: str):
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     tarstream.seek(0)
-
     container.put_archive(remote_dir, tarstream.getvalue())
     tarstream.close()
 
-
 # ============================
-# Provision & Setup
+# Provision
 # ============================
 def provision_multi(req: ShopRequest):
-    """Provision WordPress multisite with shared DB/WP containers"""
     store_name = sanitize_store_name(req.site_name)
-
-    # network
     try:
         client.networks.get(SHARED_NETWORK)
     except docker.errors.NotFound:
         client.networks.create(SHARED_NETWORK, driver="bridge")
 
-    # DB
     try:
         client.containers.get(SHARED_DB_NAME)
     except docker.errors.NotFound:
@@ -259,7 +242,6 @@ def provision_multi(req: ShopRequest):
     if not wait_for_mysql(SHARED_DB_NAME, "wpuser", "wppass", "wordpress"):
         raise HTTPException(status_code=500, detail="MySQL not ready")
 
-    # WordPress
     try:
         wp = client.containers.get(SHARED_WP_NAME)
     except docker.errors.NotFound:
@@ -291,25 +273,41 @@ def provision_multi(req: ShopRequest):
     return {"slug": store_name, "url": f"http://localhost:8080/{store_name}"}
 
 
-def setup_shop(wp, site_url: str, theme: str, locale: str, company: Optional[List[CompanyInfo]]):
-    """Setup WooCommerce shop with theme, demo data, payments, shipping"""
+# ============================
+# Setup Shop
+# ============================
+
+
+def setup_shop(wp, site_url: str, theme: str, locale: str,
+               company: Optional[List[CompanyInfo]],
+               extra_gateways: Optional[List[str]] = None,
+               payment_settings: Optional[dict] = None):
+
     logger.info("===== 🚀 Setup Shop Started =====")
+    logger.info(f"Site URL: {site_url}, Theme: {theme}, Locale: {locale}")
     run_wp_cli(wp, f"wp theme install {theme} --activate --url={site_url} --allow-root")
-    run_wp_cli(
-        wp,
-        f"wp plugin install {WOO_ZIP_URL} --force --activate --url={site_url} --allow-root",
-    )
+    run_wp_cli(wp, f"wp plugin install {WOO_ZIP_URL} --force --activate --url={site_url} --allow-root")
     run_wp_cli(wp, f"wp plugin install wordpress-importer --activate --url={site_url} --allow-root")
     run_wp_cli(wp, f"wp wc tool run install_pages --user=admin --url={site_url} --allow-root")
 
-    # demo data
     wp.exec_run(f"curl -o {WOO_DEMO_PATH} {WOO_DEMO_URL}", user="root")
     run_wp_cli(wp, f"wp import {WOO_DEMO_PATH} --authors=create --url={site_url} --allow-root")
 
+    # Set locale (Chinese packages)
+
+    logger.info(f"===== ✅ Setup locale {locale} Start =====")
+    run_wp_cli(wp, f"wp language core install {locale} --allow-root")
+    run_wp_cli(wp, f"wp site switch-language {locale} --url={site_url} --allow-root")
+    run_wp_cli(wp, f"wp option update WPLANG {locale} --url={site_url} --allow-root")
+    run_wp_cli(wp, f"wp language plugin install woocommerce {locale} --url={site_url} --allow-root")
+    run_wp_cli(wp, f"wp language theme install {theme} {locale} --url={site_url} --allow-root")
+    run_wp_cli(wp, "wp language core update --allow-root")
+    logger.info(f"===== ✅ Setup locale {locale} End =====")
+
+    # Payment Gateways
     labels = PAYMENT_LABELS.get(locale, PAYMENT_LABELS["en_US"])
     paypal_email = company[0].email if (company and company[0].email) else "paypal@example.com"
 
-    # payments
     run_wp_cli(wp, f"wp option patch update woocommerce_paypal_settings enabled yes --url={site_url} --allow-root")
     run_wp_cli(wp, f"wp option patch update woocommerce_paypal_settings title \"{labels['paypal_title']}\" --url={site_url} --allow-root")
     run_wp_cli(wp, f"wp option patch update woocommerce_paypal_settings email \"{paypal_email}\" --url={site_url} --allow-root")
@@ -322,7 +320,6 @@ def setup_shop(wp, site_url: str, theme: str, locale: str, company: Optional[Lis
             'instructions' => '{labels['cod_instructions']}'
         ));" --url={site_url} --allow-root""",
     )
-
     run_wp_cli(
         wp,
         f"""wp eval "update_option('woocommerce_bacs_settings', array(
@@ -332,165 +329,66 @@ def setup_shop(wp, site_url: str, theme: str, locale: str, company: Optional[Lis
         ));" --url={site_url} --allow-root""",
     )
 
-    # shipping
+    # Extra gateways
+    if extra_gateways:
+        for gw in extra_gateways:
+            try:
+                run_wp_cli(wp, f"wp plugin install woocommerce-gateway-{gw} --activate --allow-root")
+            except Exception as e:
+                logger.warning(f"🚫 Failed install {gw}: {e}")
+
+        if "stripe" in extra_gateways and payment_settings.get("stripe"):
+            stripe = payment_settings["stripe"]
+            run_wp_cli(
+                wp,
+                f"""wp eval "update_option('woocommerce_stripe_settings', array(
+                    'enabled' => 'yes',
+                    'title' => 'Stripe',
+                    'publishable_key' => '{stripe.get('publishable_key')}',
+                    'secret_key' => '{stripe.get('secret_key')}'
+                ));" --url={site_url} --allow-root""",
+            )
+
+        if "wechat" in extra_gateways and payment_settings.get("wechat"):
+            wechat = payment_settings["wechat"]
+            run_wp_cli(
+                wp,
+                f"""wp eval "update_option('woocommerce_wechat_settings', array(
+                    'enabled' => 'yes',
+                    'title' => 'WeChat Pay',
+                    'mch_id' => '{wechat.get('mch_id')}',
+                    'api_key' => '{wechat.get('api_key')}'
+                ));" --url={site_url} --allow-root""",
+            )
+
+    # Shipping
     run_wp_cli(wp, f"wp wc shipping_zone create --name='Default Zone' --user=admin --url={site_url} --allow-root")
     run_wp_cli(wp, f"""wp eval "WC_Shipping_Zones::get_zone(1)->add_shipping_method('flat_rate');" --url={site_url} --allow-root""")
 
     logger.info("===== ✅ Setup Shop Completed =====")
-    return {"theme": theme, "payment": "gateways enabled", "shipping": "flat rate enabled"}
+    return {"theme": theme, "locale": locale, "gateways": extra_gateways or []}
 
 
 # ============================
-# Upload functions
+# FastAPI
 # ============================
-def upload_csv(store_name: str, lang_code: str, file: UploadFile = File(...)):
-    """Upload translated CSV → PO/MO"""
-    wp = client.containers.get(SHARED_WP_NAME)
-    site_url = f"http://localhost:8080/{store_name}"
-
-    csv_content = file.file.read().decode("utf-8")
-    reader = csv.DictReader(io.StringIO(csv_content))
-
-    po = polib.POFile()
-    po.metadata = {"Project-Id-Version": "WooCommerce Translation", "Language": lang_code}
-
-    for row in reader:
-        if row.get("Original"):
-            po.append(polib.POEntry(
-                msgid=row["Original"],
-                msgctxt=row.get("Context") or None,
-                msgstr=row.get("Translation") or "",
-            ))
-
-    tmp_po = NamedTemporaryFile(delete=False, suffix=".po")
-    tmp_mo = tmp_po.name.replace(".po", ".mo")
-    po.save(tmp_po.name)
-    po.save_as_mofile(tmp_mo)
-
-    target_dir = "/var/www/html/wp-content/languages/plugins"
-    copy_to_container(wp, tmp_po.name, target_dir)
-    copy_to_container(wp, tmp_mo, target_dir)
-
-    run_wp_cli(wp, f"wp cache flush --url={site_url} --allow-root")
-    return {"status": "✅ CSV uploaded", "entries": len(po)}
-
-
-def upload_json(store_name: str, lang_code: str, file: UploadFile = File(...)):
-    """Upload translated JSON → PO/MO"""
-    wp = client.containers.get(SHARED_WP_NAME)
-    site_url = f"http://localhost:8080/{store_name}"
-
-    content = json.load(file.file)
-    if not isinstance(content, list):
-        raise HTTPException(status_code=400, detail="Invalid JSON format")
-
-    po = polib.POFile()
-    po.metadata = {"Project-Id-Version": "WooCommerce Translation", "Language": lang_code}
-
-    for row in content:
-        if row.get("Original"):
-            po.append(polib.POEntry(
-                msgid=row["Original"],
-                msgctxt=row.get("Context") or None,
-                msgstr=row.get("Translation") or "",
-            ))
-
-    tmp_po = NamedTemporaryFile(delete=False, suffix=".po")
-    tmp_mo = tmp_po.name.replace(".po", ".mo")
-    po.save(tmp_po.name)
-    po.save_as_mofile(tmp_mo)
-
-    target_dir = "/var/www/html/wp-content/languages/plugins"
-    copy_to_container(wp, tmp_po.name, target_dir)
-    copy_to_container(wp, tmp_mo, target_dir)
-
-    run_wp_cli(wp, f"wp cache flush --url={site_url} --allow-root")
-    return {"status": "✅ JSON uploaded", "entries": len(po)}
-
-
-# ============================
-# FastAPI Endpoints
-# ============================
-app = FastAPI(title="WordPress Shop Setup Service", version="36.0.0")
+app = FastAPI(title="WordPress Shop Setup Service", version="37.0.0")
 
 
 @app.post("/create_shop")
 def create_shop_endpoint(req: ShopRequest):
-    """API endpoint to provision a new multisite shop"""
     if req.tenant_mode != "multi":
         raise HTTPException(status_code=400, detail="Only multi-tenant mode supported")
     logger.info(f"⚙️ API /create_shop called for {req.site_name}")
     site = provision_multi(req)
     wp = client.containers.get(SHARED_WP_NAME)
-    setup = setup_shop(wp, site["url"], req.theme, req.locale, req.company)
+    setup = setup_shop(
+        wp,
+        site["url"],
+        req.theme,
+        req.locale,
+        req.company,
+        req.extra_gateways,
+        req.payment_settings,
+    )
     return {"site": site, "setup": setup}
-
-
-@app.get("/download_transcriptions/{store_name}")
-def download_transcriptions(store_name: str, output_format: str = "json"):
-    """Download WooCommerce POT → JSON or CSV (make-pot → GitHub → Local)"""
-    wp = client.containers.get(SHARED_WP_NAME)
-    site_url = f"http://localhost:8080/{store_name}"
-    pot_data = None
-
-    try:
-        run_wp_cli(
-            wp,
-            f"wp i18n make-pot wp-content/plugins/woocommerce /tmp/woocommerce.pot "
-            f"--url={site_url} --allow-root",
-        )
-        result = wp.exec_run("cat /tmp/woocommerce.pot", user="root")
-        tmp_data = result.output.decode("utf-8", errors="ignore").strip()
-        if "msgid" in tmp_data:
-            pot_data = tmp_data
-    except Exception as e:
-        logger.error(f"make-pot failed: {e}")
-
-    if not pot_data:
-        try:
-            resp = requests.get(
-                "https://raw.githubusercontent.com/woocommerce/woocommerce/trunk/i18n/languages/woocommerce.pot",
-                timeout=20,
-            )
-            if resp.status_code == 200 and "msgid" in resp.text:
-                pot_data = resp.text
-        except Exception as e:
-            logger.error(f"GitHub fetch failed: {e}")
-
-    if not pot_data:
-        try:
-            with open("data/woocommerce.pot", "r", encoding="utf-8") as f:
-                pot_data = f.read()
-        except Exception as e:
-            logger.error(f"Local pot read failed: {e}")
-
-    if not pot_data:
-        raise HTTPException(status_code=500, detail="No POT available")
-
-    pot = polib.pofile(pot_data)
-
-    if output_format.lower() == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["Original", "Context", "Translation"])
-        for e in pot:
-            writer.writerow([e.msgid, e.msgctxt or "", e.msgstr or ""])
-        return StreamingResponse(
-            io.BytesIO(output.getvalue().encode("utf-8")),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=woocommerce.csv"},
-        )
-
-    entries = [{"Original": e.msgid, "Context": e.msgctxt or "", "Translation": e.msgstr or ""} for e in pot]
-    return JSONResponse(content=entries)
-
-
-@app.post("/upload_csv/{store_name}")
-def upload_transcriptions(store_name: str, language_code: str, file: UploadFile = File(...)):
-    """Upload translations (CSV or JSON)"""
-    file_extension = file.filename.split(".")[-1].lower()
-    if file_extension == "csv":
-        return upload_csv(store_name, language_code, file)
-    elif file_extension == "json":
-        return upload_json(store_name, language_code, file)
-    raise HTTPException(status_code=400, detail="Unsupported file format. Please upload CSV or JSON.")
